@@ -51,9 +51,10 @@ def transform_query(state: GraphState):
     return {"question": better_question, "retry_count": state.get("retry_count", 0) + 1}
 
 def web_search(state: GraphState):
-    """联网搜索节点 - 修复 TypeError 并增强稳定性"""
+    """联网搜索节点 - 增加实时调试反馈"""
     if not TAVILY_KEY:
-        return {"documents": ["错误：未检测到有效的 TAVILY_API_KEY，无法执行联网搜索。"], "source": "web"}
+        st.error("❌ 联网搜索失败：未检测到 TAVILY_API_KEY。请检查 Secrets 配置。")
+        return {"documents": ["TAVILY_API_KEY 未配置"], "source": "web"}
         
     search = TavilySearchResults(max_results=3, api_key=TAVILY_KEY)
     try:
@@ -68,10 +69,11 @@ def web_search(state: GraphState):
             web_content = str(search_results)
             
         if not web_content.strip():
-            web_content = "联网搜索未找到相关结果。"
+            web_content = "联网搜索未找到结果。"
             
     except Exception as e:
-        web_content = f"联网搜索 API 调用失败。错误详情: {str(e)}"
+        st.warning(f"⚠️ 联网搜索 API 调用异常: {str(e)}")
+        web_content = f"调用失败: {str(e)}"
         
     return {"documents": [web_content], "source": "web"}
 
