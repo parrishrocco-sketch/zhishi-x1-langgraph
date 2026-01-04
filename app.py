@@ -8,7 +8,7 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import START, END, StateGraph
 
-os.getenv("DEEPSEEK_API_KEY")("API.env")
+api_key = os.getenv("DEEPSEEK_API_key")
 
 class GraphState(TypedDict):
     question: str
