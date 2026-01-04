@@ -11,9 +11,9 @@ from langgraph.graph import START, END, StateGraph
 # --- 1. UI 基础设置 ---
 st.set_page_config(page_title="智视 X1 智能助手", layout="centered")
 st.title("🤖 智视 X1 智能客服助手")
-st.caption("基于 LangGraph 的自纠错 RAG 系统")
+st.caption("基于 LangGraph 的自纠错 RAG 系统（支持主动反问与联网搜索）")
 
-# 获取 API Key (修复变量名大小写不一致问题)
+# 获取 API Key
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 TAVILY_KEY = os.getenv("TAVILY_API_KEY")
 
@@ -28,7 +28,7 @@ class GraphState(TypedDict):
     generation: str
     documents: List[str]
     retry_count: int
-    source: str
+    source: str # 追踪来源：local 或 web
 
 def retrieve(state: GraphState):
     """检索节点"""
@@ -36,55 +36,96 @@ def retrieve(state: GraphState):
     db_path = os.path.join(current_dir, "chroma_db")
     
     if not os.path.exists(db_path):
-        return {"documents": ["【系统提示】未发现本地数据库，请确保已运行 Ingest.py 且上传了 chroma_db 文件夹"]}
+        return {"documents": ["Error: Local database directory not found."]}
 
+    # 注意：确保已安装 sentence-transformers
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-zh-v1.5")
     vectorstore = Chroma(persist_directory=db_path, embedding_function=embeddings)
     docs = vectorstore.similarity_search(state["question"], k=3)
-    return {"documents": [d.page_content for d in docs]}
+    return {"documents": [d.page_content for d in docs], "source": "local"}
 
 def transform_query(state: GraphState):
+    """查询优化节点"""
     llm = ChatOpenAI(model='deepseek-chat', api_key=DEEPSEEK_KEY, openai_api_base='https://api.deepseek.com', temperature=0)
-    prompt = f"请优化此搜索词以获得更好结果: {state['question']}\n只输出优化后的文本。"
+    prompt = f"当前问题检索不到结果或语义模糊。请将此问题重写为更适合检索的关键词，如果是用户需求不明确，请原样返回并等待反问逻辑。问题: {state['question']}"
     better_question = llm.invoke(prompt).content
     return {"question": better_question, "retry_count": state.get("retry_count", 0) + 1}
 
 def web_search(state: GraphState):
+    """联网搜索节点"""
     search = TavilySearchResults(max_results=3, api_key=TAVILY_KEY)
     search_results = search.invoke(state["question"])
     web_content = "\n".join([d['content'] for d in search_results])
     return {"documents": [web_content], "source": "web"}
 
 def decide_to_generate(state: GraphState):
+    """关键决策节点：判断是否需要反问或转入联网搜索"""
     llm = ChatOpenAI(model='deepseek-chat', openai_api_base='https://api.deepseek.com', api_key=DEEPSEEK_KEY, temperature=0)
     docs_text = "\n".join(state["documents"])
-    grader_prompt = f"问题: {state['question']}\n文档: {docs_text}\n请判断文档是否足以回答问题？仅回复 YES 或 NO。"
+    
+    # 修改评分逻辑：同时判断相关性与明确度
+    grader_prompt = (
+        f"问题: {state['question']}\n文档内容: {docs_text}\n"
+        "任务：判断文档是否足以准确回答问题？\n"
+        "1. 如果文档完全包含答案，回复 YES。\n"
+        "2. 如果问题非常模糊，需要用户补充信息，回复 CLARIFY。\n"
+        "3. 如果文档与问题无关，回复 NO。"
+    )
     score = llm.invoke(grader_prompt).content.strip().upper()
-    if "YES" in score: return "generate"
-    if state.get("retry_count", 0) >= 1: return "web_search"
+
+    if "YES" in score or "CLARIFY" in score:
+        return "generate" # 进入生成节点（生成节点会根据情况回答或反问）
+    if state.get("retry_count", 0) >= 1:
+        return "web_search" # 尝试过本地优化后仍无果，转联网搜索
     return "transform_query"
 
 def generate(state: GraphState):
+    """生成回答或反问节点"""
     llm = ChatOpenAI(model='deepseek-chat', openai_api_base='https://api.deepseek.com', api_key=DEEPSEEK_KEY, temperature=0)
     source = state.get("source", "local")
-    prefix = "【💡 本地知识库回答】\n" if source == "local" else "【⚠️ 联网搜索结果】\n"
-    system_rules = "你是一个严谨的产品专家。如果信息缺失，请主动提问。严禁编造。"
-    prompt = ChatPromptTemplate.from_messages([("system", system_rules), ("human", "上下文: {context}\n问题: {question}")])
+    
+    # 根据来源设置前缀与免责声明
+    if source == "local":
+        prefix = "【💡 本地知识库回答】\n"
+    else:
+        prefix = "【⚠️ 联网搜索结果（仅供参考，请以说明书实物为准）】\n"
+    
+    # 核心：要求 AI 必须在信息不足时反问
+    system_rules = (
+        "你是一个专业的智视 X1 智能摄像机客服专家。你的回答准则如下：\n"
+        "1. 严格基于提供的上下文回答。严禁编造说明书里没有的参数。\n"
+        "2. 如果上下文信息不足、存在冲突或用户问题太模糊，不要强行回答，必须以礼貌的口吻向用户提出针对性的反问，引导其补充信息。\n"
+        "3. 如果是联网搜索结果，请在回答中保持客观。"
+    )
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_rules),
+        ("human", "上下文: {context}\n问题: {question}")
+    ])
+    
     response = (prompt | llm).invoke({"context": state["documents"], "question": state["question"]})
     return {"generation": prefix + response.content}
 
+# --- 3. 构建工作流 ---
 workflow = StateGraph(GraphState)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("transform_query", transform_query)
 workflow.add_node("web_search", web_search)
 workflow.add_node("generate", generate)
+
 workflow.add_edge(START, "retrieve")
-workflow.add_conditional_edges("retrieve", decide_to_generate, {"generate": "generate", "transform_query": "transform_query", "web_search": "web_search"})
+workflow.add_conditional_edges("retrieve", decide_to_generate, {
+    "generate": "generate", 
+    "transform_query": "transform_query", 
+    "web_search": "web_search"
+})
 workflow.add_edge("transform_query", "retrieve")
 workflow.add_edge("web_search", "generate")
 workflow.add_edge("generate", END)
+
 langgraph_app = workflow.compile()
 
+# --- 4. Streamlit UI 交互 ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -92,16 +133,16 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("请提问，例如：智视 X1 的分辨率是多少？"):
+if prompt := st.chat_input("请提问，例如：智视 X1 怎么安装？"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("AI 正在思考并检索知识库..."):
+        with st.spinner("系统正在检索并思考..."):
             inputs = {"question": prompt, "retry_count": 0, "documents": []}
             result = langgraph_app.invoke(inputs)
-            response = result["generation"]
-            st.markdown(response)
+            response_text = result["generation"]
+            st.markdown(response_text)
     
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
