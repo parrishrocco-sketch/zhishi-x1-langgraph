@@ -4,6 +4,8 @@ streamlit
 langchain-openai
 langchain-community
 langchain-chroma
+chromadb
 tavily-python
 python-dotenv
 pypdf
+sentence-transformers
