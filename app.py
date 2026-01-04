@@ -8,12 +8,10 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import START, END, StateGraph
 
-# --- 1. UI 基础设置 ---
 st.set_page_config(page_title="智视 X1 智能助手", layout="centered")
 st.title("🤖 智视 X1 智能客服助手")
 st.caption("基于 LangGraph 的自纠错 RAG 系统（支持主动反问与联网搜索）")
 
-# 获取 API Key
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 TAVILY_KEY = os.getenv("TAVILY_API_KEY")
 
@@ -21,14 +19,13 @@ if not DEEPSEEK_KEY:
     st.error("❌ 未检测到 DEEPSEEK_API_KEY，请在 Streamlit Secrets 中配置")
     st.stop()
 
-# --- 2. 定义 GraphState 和节点逻辑 ---
 
 class GraphState(TypedDict):
     question: str
     generation: str
     documents: List[str]
     retry_count: int
-    source: str # 追踪来源：local 或 web
+    source: str 
 
 def retrieve(state: GraphState):
     """检索节点"""
@@ -38,7 +35,6 @@ def retrieve(state: GraphState):
     if not os.path.exists(db_path):
         return {"documents": ["Error: Local database directory not found."]}
 
-    # 注意：确保已安装 sentence-transformers
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-zh-v1.5")
     vectorstore = Chroma(persist_directory=db_path, embedding_function=embeddings)
     docs = vectorstore.similarity_search(state["question"], k=3)
@@ -52,10 +48,18 @@ def transform_query(state: GraphState):
     return {"question": better_question, "retry_count": state.get("retry_count", 0) + 1}
 
 def web_search(state: GraphState):
-    """联网搜索节点"""
+    """联网搜索节点 - 增加结果类型检查以修复 TypeError"""
     search = TavilySearchResults(max_results=3, api_key=TAVILY_KEY)
     search_results = search.invoke(state["question"])
-    web_content = "\n".join([d['content'] for d in search_results])
+    
+    if isinstance(search_results, list):
+        web_content = "\n".join([
+            d['content'] if isinstance(d, dict) and 'content' in d else str(d) 
+            for d in search_results
+        ])
+    else:
+        web_content = str(search_results)
+        
     return {"documents": [web_content], "source": "web"}
 
 def decide_to_generate(state: GraphState):
@@ -63,7 +67,6 @@ def decide_to_generate(state: GraphState):
     llm = ChatOpenAI(model='deepseek-chat', openai_api_base='https://api.deepseek.com', api_key=DEEPSEEK_KEY, temperature=0)
     docs_text = "\n".join(state["documents"])
     
-    # 修改评分逻辑：同时判断相关性与明确度
     grader_prompt = (
         f"问题: {state['question']}\n文档内容: {docs_text}\n"
         "任务：判断文档是否足以准确回答问题？\n"
@@ -74,9 +77,9 @@ def decide_to_generate(state: GraphState):
     score = llm.invoke(grader_prompt).content.strip().upper()
 
     if "YES" in score or "CLARIFY" in score:
-        return "generate" # 进入生成节点（生成节点会根据情况回答或反问）
+        return "generate" 
     if state.get("retry_count", 0) >= 1:
-        return "web_search" # 尝试过本地优化后仍无果，转联网搜索
+        return "web_search" 
     return "transform_query"
 
 def generate(state: GraphState):
@@ -84,13 +87,11 @@ def generate(state: GraphState):
     llm = ChatOpenAI(model='deepseek-chat', openai_api_base='https://api.deepseek.com', api_key=DEEPSEEK_KEY, temperature=0)
     source = state.get("source", "local")
     
-    # 根据来源设置前缀与免责声明
     if source == "local":
         prefix = "【💡 本地知识库回答】\n"
     else:
         prefix = "【⚠️ 联网搜索结果（仅供参考，请以说明书实物为准）】\n"
     
-    # 核心：要求 AI 必须在信息不足时反问
     system_rules = (
         "你是一个专业的智视 X1 智能摄像机客服专家。你的回答准则如下：\n"
         "1. 严格基于提供的上下文回答。严禁编造说明书里没有的参数。\n"
@@ -106,7 +107,6 @@ def generate(state: GraphState):
     response = (prompt | llm).invoke({"context": state["documents"], "question": state["question"]})
     return {"generation": prefix + response.content}
 
-# --- 3. 构建工作流 ---
 workflow = StateGraph(GraphState)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("transform_query", transform_query)
@@ -125,7 +125,6 @@ workflow.add_edge("generate", END)
 
 langgraph_app = workflow.compile()
 
-# --- 4. Streamlit UI 交互 ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
