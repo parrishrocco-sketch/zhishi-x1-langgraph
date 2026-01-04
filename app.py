@@ -8,7 +8,18 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import START, END, StateGraph
 
-api_key = os.getenv("DEEPSEEK_API_key")
+st.set_page_config(page_title="智视 X1 智能助手", layout="centered")
+st.title("🤖 智视 X1 智能客服助手")
+st.caption("基于 LangGraph 的自纠错 RAG 系统")
+
+# 获取 API Key (统一使用全大写，与 Streamlit Secrets 一致)
+# 修复 image_f4866f.png 中的 TypeError 语法错误
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
+TAVILY_KEY = os.getenv("TAVILY_API_KEY")
+
+if not DEEPSEEK_KEY:
+    st.error("❌ 未检测到 DEEPSEEK_API_KEY，请在 Secrets 中配置")
+    st.stop()
 
 class GraphState(TypedDict):
     question: str
