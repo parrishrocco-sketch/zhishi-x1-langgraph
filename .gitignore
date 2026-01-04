@@ -9,5 +9,3 @@ __pycache__/
 API.env
 
 .ipynb_checkpoints/
-
-chroma_db/
