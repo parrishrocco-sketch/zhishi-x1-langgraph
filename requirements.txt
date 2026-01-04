@@ -3,7 +3,6 @@ langgraph
 streamlit
 langchain-openai
 langchain-community
-chromadb
 langchain-chroma
 tavily-python
 python-dotenv
