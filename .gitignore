@@ -1,0 +1,13 @@
+.venv/
+venv/
+env/
+
+__pycache__/
+*.pyc
+
+.env
+API.env
+
+.ipynb_checkpoints/
+
+chroma_db/
