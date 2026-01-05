@@ -1,7 +1,7 @@
 import os
 import streamlit as st
-from typing import List, TypedDict
-from dotenv import load_dotenv  #
+from typing import List, TypedDict, Dict, Any
+from dotenv import load_dotenv 
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceEmbeddings 
 from langchain_chroma import Chroma
@@ -9,12 +9,15 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import START, END, StateGraph
 
+# --- 0. 加载环境 ---
 load_dotenv() 
 
+# --- 1. UI 基础设置 ---
 st.set_page_config(page_title="智视 X1 智能助手", layout="centered")
 st.title("🤖 智视 X1 智能客服助手")
-st.caption("基于 LangGraph 的自纠错 RAG 系统（已优化联网搜索）")
+st.caption("基于 LangGraph 的自纠错 RAG 系统（支持多轮对话与主动反问）")
 
+# 获取并检查 API Key
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
 TAVILY_KEY = os.getenv("TAVILY_API_KEY")
 
@@ -22,6 +25,7 @@ if not DEEPSEEK_KEY:
     st.error("❌ 未检测到 DEEPSEEK_API_KEY，请检查环境变量或 Streamlit Secrets 配置")
     st.stop()
 
+# --- 2. 定义 GraphState 和节点逻辑 ---
 
 class GraphState(TypedDict):
     question: str
@@ -29,6 +33,7 @@ class GraphState(TypedDict):
     documents: List[str]
     retry_count: int
     source: str 
+    chat_history: List[Dict[str, Any]] 
 
 def retrieve(state: GraphState):
     """检索节点"""
@@ -44,16 +49,29 @@ def retrieve(state: GraphState):
     return {"documents": [d.page_content for d in docs], "source": "local"}
 
 def transform_query(state: GraphState):
-    """查询优化节点"""
+    """查询优化节点 - 核心修改：增加历史上下文感知"""
     llm = ChatOpenAI(model='deepseek-chat', api_key=DEEPSEEK_KEY, openai_api_base='https://api.deepseek.com', temperature=0)
-    prompt = f"请将此问题重写为更适合检索的关键词。问题: {state['question']}"
+    
+    history = state.get("chat_history", [])
+    history_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in history[-5:]])
+    
+    prompt = (
+        f"任务：结合对话历史，将用户的最新简短回复重写为一个完整的、独立的检索问题。\n"
+        f"1. 如果用户的回复是针对上文反问的回答（例如上文问'安装在哪里'，用户回'玻璃上'），请将其合并为完整问题（如'智视 X1 如何安装在玻璃上'）。\n"
+        f"2. 如果用户的回复是全新的问题，请忽略历史，仅优化当前问题关键词。\n\n"
+        f"对话历史：\n{history_context}\n"
+        f"用户最新回复：{state['question']}\n\n"
+        f"重写后的完整问题（仅输出文本，不要解释）："
+    )
+    
     better_question = llm.invoke(prompt).content
+    print(f"【Debug】优化后的问题: {better_question}")
     return {"question": better_question, "retry_count": state.get("retry_count", 0) + 1}
 
 def web_search(state: GraphState):
-    """联网搜索节点 - 增加实时调试反馈"""
+    """联网搜索节点"""
     if not TAVILY_KEY:
-        st.error("❌ 联网搜索失败：未检测到 TAVILY_API_KEY。请检查 Secrets 配置。")
+        st.error("❌ 联网搜索失败：未检测到 TAVILY_API_KEY")
         return {"documents": ["TAVILY_API_KEY 未配置"], "source": "web"}
         
     search = TavilySearchResults(max_results=3, api_key=TAVILY_KEY)
@@ -90,12 +108,13 @@ def decide_to_generate(state: GraphState):
 
     if "YES" in score or "CLARIFY" in score:
         return "generate"
-    if state.get("retry_count", 0) >= 1:
-        return "web_search"
-    return "transform_query"
+   
+    if state.get("retry_count", 0) < 1:
+        return "transform_query"
+    return "web_search"
 
 def generate(state: GraphState):
-    """生成回答 - 包含主动反问逻辑"""
+    """生成回答"""
     llm = ChatOpenAI(model='deepseek-chat', openai_api_base='https://api.deepseek.com', api_key=DEEPSEEK_KEY, temperature=0)
     source = state.get("source", "local")
     
@@ -104,7 +123,7 @@ def generate(state: GraphState):
     system_rules = (
         "你是一个专业的智能摄像机客服。准则：\n"
         "1. 信息不足或问题模糊时，必须礼貌地反问用户补充细节，严禁编造。\n"
-        "2. 如果上下文提到‘调用失败’或‘未检测到 KEY’，请如实告知用户系统配置问题。"
+        "2. 优先基于上下文回答。"
     )
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_rules),
@@ -138,14 +157,21 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("请提问，例如：2026年热门相机的趋势？"):
+if prompt := st.chat_input("请提问..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("思考中..."):
-            inputs = {"question": prompt, "retry_count": 0, "documents": []}
+            
+            inputs = {
+                "question": prompt, 
+                "retry_count": 0, 
+                "documents": [],
+                "chat_history": st.session_state.messages[:-1] 
+            }
+            
             result = langgraph_app.invoke(inputs)
             response_text = result["generation"]
             st.markdown(response_text)
